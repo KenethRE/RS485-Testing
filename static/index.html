@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>USR-W610 WebSocket Console</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1rem; }
+    .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+    #log { width: 100%; height: 40vh; white-space: pre-wrap; overflow: auto; border: 1px solid #ccc; padding: .5rem; }
+    textarea { width: 100%; height: 8rem; }
+    button { padding: .4rem .8rem; }
+    label { display: inline-flex; align-items: center; gap: .25rem; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <h1>USR‑W610 WebSocket Console</h1>
+
+  <div class="row">
+    <label>W610 IP:
+      <input id="ip" value="192.168.0.115" class="mono" />
+    </label>
+    <label>Port:
+      <input id="port" value="8000" class="mono" />
+    </label>
+    <button id="connect">Connect</button>
+    <button id="disconnect" disabled>Disconnect</button>
+    <label><input type="checkbox" id="hexView"> Show incoming as Hex</label>
+  </div>
+
+  <p>Status: <strong id="status">disconnected</strong></p>
+
+  <div id="log" class="mono"></div>
+
+  <h3>Send data</h3>
+  <div class="row">
+    <label><input type="checkbox" id="sendHex"> Interpret input as Hex</label>
+    <label><input type="checkbox" id="appendNewline" checked> Append <span class="mono">\r\n</span></label>
+  </div>
+  <textarea id="out"></textarea>
+  <div class="row">
+    <button id="send" disabled>Send</button>
+    <button id="clear">Clear log</button>
+  </div>
+
+  <script>
+    let ws = null;
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const ipEl = document.getElementById('ip');
+    const portEl = document.getElementById('port');
+    const hexViewEl = document.getElementById('hexView');
+    const sendHexEl = document.getElementById('sendHex');
+    const sendBtn = document.getElementById('send');
+    const outEl = document.getElementById('out');
+    const appendNewlineEl = document.getElementById('appendNewline');
+
+    function log(msg) {
+      const at = new Date().toISOString().replace('T', ' ').replace('Z', '');
+      logEl.textContent += `[${at}] ${msg}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function toHex(arrBuf) {
+      const bytes = new Uint8Array(arrBuf);
+      return Array.from(bytes).map(b => b.toString(16).padStart(2,'0')).join(' ');
+    }
+
+    function hexStringToBytes(hex) {
+      const clean = hex.replace(/[^0-9a-fA-F]/g, '');
+      if (clean.length % 2 !== 0) throw new Error('Hex string must have even length');
+      const bytes = new Uint8Array(clean.length / 2);
+      for (let i = 0; i < clean.length; i += 2) {
+        bytes[i/2] = parseInt(clean.substr(i, 2), 16);
+      }
+      return bytes;
+    }
+
+    document.getElementById('connect').addEventListener('click', () => {
+      const url = `ws://${ipEl.value.trim()}:${portEl.value.trim()}`;
+      ws = new WebSocket(url);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        statusEl.textContent = 'connected';
+        log(`Connected to ${url}`);
+        document.getElementById('disconnect').disabled = false;
+        document.getElementById('connect').disabled = true;
+        sendBtn.disabled = false;
+      };
+
+      ws.onmessage = (ev) => {
+        if (ev.data instanceof ArrayBuffer) {
+          const buf = ev.data;
+          if (hexViewEl.checked) {
+            log(`<= [HEX] ${toHex(buf)}`);
+          } else {
+            const text = new TextDecoder().decode(new Uint8Array(buf));
+            log(`<= ${text}`);
+          }
+        } else {
+          // Some devices may send text frames
+          log(`<= ${ev.data}`);
+        }
+      };
+
+      ws.onerror = (e) => {
+        log('WebSocket error (see console).');
+        console.error(e);
+      };
+
+      ws.onclose = () => {
+        statusEl.textContent = 'disconnected';
+        log('Disconnected.');
+        document.getElementById('disconnect').disabled = true;
+        document.getElementById('connect').disabled = false;
+        sendBtn.disabled = true;
+        ws = null;
+      };
+    });
+
+    document.getElementById('disconnect').addEventListener('click', () => {
+      if (ws) ws.close();
+    });
+
+    document.getElementById('clear').addEventListener('click', () => {
+      logEl.textContent = '';
+    });
+
+    sendBtn.addEventListener('click', () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) { log('Not connected.'); return; }
+
+      try {
+        if (sendHexEl.checked) {
+          const bytes = hexStringToBytes(outEl.value);
+          ws.send(bytes);
+          log(`=> [HEX] ${toHex(bytes.buffer)}`);
+        } else {
+          let text = outEl.value;
+          if (appendNewlineEl.checked) text += '\r\n';
+          const bytes = new TextEncoder().encode(text);
+          ws.send(bytes);
+          log(`=> ${text.replace(/\r\n$/, '\\r\\n')}`);
+        }
+      } catch (err) {
+        log(`Send error: ${err.message}`);
+      }
+    });
+  </script>
+</body>
+</html>

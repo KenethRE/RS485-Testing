@@ -1,13 +1,15 @@
-# TCP Web App: Flask server to bridge TCP<->Web interface for W610 with Login
+# TCP Web App: Flask server to bridge TCP<->Web interface for W610 with Admin Panel
 from flask import Flask, render_template, request, redirect, url_for
 from flask_socketio import SocketIO, emit
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+from werkzeug.security import generate_password_hash, check_password_hash
+import sqlite3
 import socket
 import threading
 import os
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
-app.secret_key = 'change-this-secret-key'
+app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key')
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Flask-Login setup
@@ -15,25 +17,92 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
-# Simple user store (replace with DB in production)
-class User(UserMixin):
-    def __init__(self, id):
-        self.id = id
+DATABASE = 'users.db'
 
-users = {'admin': {'password': 'admin'}}
+# --- Admin-only panel ---
+@app.route('/admin', methods=['GET', 'POST'])
+@login_required
+def admin_panel():
+    if current_user.role != 'admin':
+        return redirect(url_for('index'))
+    msg = None
+    if request.method == 'POST':
+        if 'delete' in request.form:
+            to_delete = request.form['delete']
+            if to_delete != 'admin':
+                with sqlite3.connect(DATABASE) as conn:
+                    conn.execute("DELETE FROM users WHERE username = ?", (to_delete,))
+                msg = f"🗑️ User '{to_delete}' deleted."
+            else:
+                msg = "❌ You cannot delete the default admin."
+        else:
+            new_user = request.form['username']
+            password = request.form['password']
+            role = request.form['role']
+            if new_user and password:
+                try:
+                    with sqlite3.connect(DATABASE) as conn:
+                        conn.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                                     (new_user, generate_password_hash(password), role))
+                    msg = f"✅ User '{new_user}' created."
+                except sqlite3.IntegrityError:
+                    msg = "❌ That username already exists."
+    with sqlite3.connect(DATABASE) as conn:
+        users = conn.execute("SELECT username, role FROM users").fetchall()
+    return render_template('admin.html', users=users, msg=msg)
+
+def init_db():
+    with sqlite3.connect(DATABASE) as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL
+        )''')
+        # Prompt for admin password if no users exist
+        cursor = conn.execute("SELECT COUNT(*) FROM users")
+        if cursor.fetchone()[0] == 0:
+            import getpass
+            print("✅ Users table found but no users exist.")
+            print("⚙️  No users found. Let's set up the initial admin account.")
+            while True:
+                password = getpass.getpass("Set admin password: ")
+                confirm = getpass.getpass("Confirm password: ")
+                if password == confirm and password:
+                    break
+                print("❗ Passwords do not match or are empty. Try again.")
+            conn.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                         ('admin', generate_password_hash(password), 'admin'))
+            print("✅ Admin user created successfully.")
+        else:
+            print("🔐 Admin user already exists. Skipping setup.")
+
+class User(UserMixin):
+    def __init__(self, id_, username, role):
+        self.id = id_
+        self.username = username
+        self.role = role
 
 @login_manager.user_loader
 def load_user(user_id):
-    return User(user_id) if user_id in users else None
+    with sqlite3.connect(DATABASE) as conn:
+        cur = conn.execute("SELECT id, username, role FROM users WHERE id = ?", (user_id,))
+        row = cur.fetchone()
+        if row:
+            return User(row[0], row[1], row[2])
+    return None
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
-        if username in users and users[username]['password'] == password:
-            login_user(User(username))
-            return redirect(url_for('index'))
+        with sqlite3.connect(DATABASE) as conn:
+            cur = conn.execute("SELECT id, password, role FROM users WHERE username = ?", (username,))
+            row = cur.fetchone()
+            if row and check_password_hash(row[1], password):
+                login_user(User(row[0], username, row[2]))
+                return redirect(url_for('index'))
         return render_template('login.html', error='Invalid credentials')
     return render_template('login.html')
 
@@ -110,25 +179,7 @@ def handle_send_data(data):
 
 if __name__ == '__main__':
     os.makedirs('templates', exist_ok=True)
-    with open('templates/login.html', 'w', encoding='utf-8') as f:
-        f.write("""<!DOCTYPE html>
-<html lang='en'>
-<head>
-  <meta charset='UTF-8'>
-  <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-  <title>Login</title>
-</head>
-<body>
-  <h2>Login</h2>
-  {% if error %}<p style='color:red;'>{{ error }}</p>{% endif %}
-  <form method='post'>
-    <label>Username: <input type='text' name='username'></label><br>
-    <label>Password: <input type='password' name='password'></label><br>
-    <button type='submit'>Login</button>
-  </form>
-</body>
-</html>""")
-
+    init_db()
     with open('templates/login.html', 'w', encoding='utf-8') as f:
         f.write("""<!DOCTYPE html>
 <html lang='en'>

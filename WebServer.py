@@ -129,6 +129,38 @@ if __name__ == '__main__':
 </body>
 </html>""")
 
+    with open('templates/login.html', 'w', encoding='utf-8') as f:
+        f.write("""<!DOCTYPE html>
+<html lang='en'>
+<head>
+  <meta charset='UTF-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+  <title>Login</title>
+  <link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css' rel='stylesheet'>
+</head>
+<body class='bg-light'>
+  <div class='container mt-5'>
+    <div class='card shadow'>
+      <div class='card-body'>
+        <h2 class='card-title'>Login</h2>
+        {% if error %}<div class='alert alert-danger'>{{ error }}</div>{% endif %}
+        <form method='post'>
+          <div class='mb-3'>
+            <label class='form-label'>Username</label>
+            <input type='text' name='username' class='form-control'>
+          </div>
+          <div class='mb-3'>
+            <label class='form-label'>Password</label>
+            <input type='password' name='password' class='form-control'>
+          </div>
+          <button type='submit' class='btn btn-primary'>Login</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</body>
+</html>""")
+
     with open('templates/index.html', 'w', encoding='utf-8') as f:
         f.write("""<!DOCTYPE html>
 <html lang='en'>
@@ -136,33 +168,47 @@ if __name__ == '__main__':
   <meta charset='UTF-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1.0'>
   <title>W610 TCP Web Console</title>
+  <link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css' rel='stylesheet'>
   <script src='https://cdn.socket.io/4.5.4/socket.io.min.js'></script>
   <style>
     #logContainer {
       height: 300px;
       overflow-y: auto;
-      border: 1px solid #ccc;
-      padding: 0.5em;
       font-family: monospace;
       white-space: pre-wrap;
+      background-color: #f8f9fa;
+      border: 1px solid #dee2e6;
+      padding: 1em;
     }
   </style>
 </head>
-<body>
-  <h2>W610 TCP Web Console</h2>
-  <p>Status: <span id='status'>disconnected</span></p>
-  <button onclick='connectTCP()'>Connect</button>
-  <button onclick='disconnectTCP()'>Disconnect</button>
-  <a href='/logout'>Logout</a>
-  <hr>
-  <div id='logContainer'></div>
-  <br>
-  <select id='dataType'>
-    <option value='text'>Text</option>
-    <option value='hex'>Hex</option>
-  </select>
-  <input type='text' id='inputData' placeholder='Enter text or hex'>
-  <button onclick='sendData()'>Send</button>
+<body class='bg-light'>
+  <div class='container mt-4'>
+    <div class='d-flex justify-content-between align-items-center mb-3'>
+      <h2>W610 TCP Web Console</h2>
+      <a href='/logout' class='btn btn-outline-danger btn-sm'>Logout</a>
+    </div>
+    <div class='mb-3'>
+      <strong>Status:</strong> <span id='status' class='text-muted'>disconnected</span>
+      <button onclick='connectTCP()' class='btn btn-success btn-sm ms-3'>Connect</button>
+      <button onclick='disconnectTCP()' class='btn btn-warning btn-sm ms-1'>Disconnect</button>
+    </div>
+    <div id='logContainer' class='mb-4'></div>
+    <div class='row g-2'>
+      <div class='col-auto'>
+        <select id='dataType' class='form-select'>
+          <option value='text'>Text</option>
+          <option value='hex'>Hex</option>
+        </select>
+      </div>
+      <div class='col'>
+        <input type='text' id='inputData' class='form-control' placeholder='Enter text or hex'>
+      </div>
+      <div class='col-auto'>
+        <button onclick='sendData()' class='btn btn-primary'>Send</button>
+      </div>
+    </div>
+  </div>
   <script>
     const socket = io();
     const logContainer = document.getElementById('logContainer');

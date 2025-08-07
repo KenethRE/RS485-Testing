@@ -1,0 +1,16 @@
+# Flask web framework and extensions
+Flask==3.0.0
+Flask-SocketIO==5.3.6
+Flask-Login==0.6.3
+
+# HTTP requests library
+requests==2.31.0
+
+# Password hashing (included with Flask but explicit for clarity)
+Werkzeug==3.0.1
+
+# WebSocket support (dependency of Flask-SocketIO)
+python-socketio==5.10.0
+
+# Event-driven networking (dependency of python-socketio)
+eventlet==0.33.3

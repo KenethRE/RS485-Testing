@@ -7,6 +7,8 @@ import sqlite3
 import socket
 import threading
 import os
+import requests
+import json
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
 app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key')
@@ -18,15 +20,52 @@ login_manager.init_app(app)
 login_manager.login_view = 'login'
 
 DATABASE = 'users.db'
+EXTERNAL_URL = os.getenv('STREAM_URL')
+external_buffer = []
+BUFFER_FILE = 'external_buffer.jsonl'
 
-# --- Admin-only panel ---
+if os.path.exists(BUFFER_FILE):
+    with open(BUFFER_FILE, 'r', encoding='utf-8') as f:
+        external_buffer.extend(line.strip() for line in f if line.strip())
+    print(f"[External stream] Loaded {len(external_buffer)} buffered messages from disk.")
+
 @app.route('/admin', methods=['GET', 'POST'])
+@app.route('/admin/buffer', methods=['GET'])
 @login_required
 def admin_panel():
     if current_user.role != 'admin':
         return redirect(url_for('index'))
     msg = None
     if request.method == 'POST':
+        if 'clear_buffer' in request.form:
+            external_buffer.clear()
+            with open(BUFFER_FILE, 'w', encoding='utf-8') as f:
+                pass
+            msg = "🧹 Buffer cleared."
+        if 'flush_buffer' in request.form:
+            flushed = 0
+            try:
+                while external_buffer:
+                    cached = json.loads(external_buffer.pop(0))
+                    requests.post(EXTERNAL_URL, json=cached, timeout=5, headers={
+                            'Authorization': f"Bearer {os.getenv('STREAM_TOKEN', '')}"
+                        })
+                    flushed += 1
+                with open(BUFFER_FILE, 'w', encoding='utf-8') as f:
+                    pass
+                msg = f"🚀 Flushed {flushed} messages from buffer."
+            except Exception as e:
+                msg = f"⚠️ Error while flushing buffer: {e}"
+        if 'update_user' in request.form:
+            to_update = request.form['update_user']
+            new_pass = request.form['new_password']
+            if new_pass:
+                with sqlite3.connect(DATABASE) as conn:
+                    conn.execute("UPDATE users SET password = ? WHERE username = ?",
+                                 (generate_password_hash(new_pass), to_update))
+                msg = f"🔑 Password for '{to_update}' updated."
+            else:
+                msg = "❗ New password cannot be empty."
         if 'delete' in request.form:
             to_delete = request.form['delete']
             if to_delete != 'admin':
@@ -35,7 +74,7 @@ def admin_panel():
                 msg = f"🗑️ User '{to_delete}' deleted."
             else:
                 msg = "❌ You cannot delete the default admin."
-        else:
+        elif 'username' in request.form and 'password' in request.form and 'role' in request.form:
             new_user = request.form['username']
             password = request.form['password']
             role = request.form['role']
@@ -49,7 +88,8 @@ def admin_panel():
                     msg = "❌ That username already exists."
     with sqlite3.connect(DATABASE) as conn:
         users = conn.execute("SELECT username, role FROM users").fetchall()
-    return render_template('admin.html', users=users, msg=msg)
+    buffer_status = {'count': len(external_buffer), 'path': BUFFER_FILE}
+    return render_template('admin.html', users=users, msg=msg, buffer_status=buffer_status)
 
 def init_db():
     with sqlite3.connect(DATABASE) as conn:
@@ -59,7 +99,6 @@ def init_db():
             password TEXT NOT NULL,
             role TEXT NOT NULL
         )''')
-        # Prompt for admin password if no users exist
         cursor = conn.execute("SELECT COUNT(*) FROM users")
         if cursor.fetchone()[0] == 0:
             import getpass
@@ -117,7 +156,6 @@ def logout():
 def index():
     return render_template('index.html')
 
-# TCP config
 W610_IP = '192.168.0.115'
 W610_PORT = 8899
 TCP_TIMEOUT = 2.0
@@ -132,7 +170,39 @@ def tcp_receive_loop():
             timestamp = __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             if not data:
                 break
-            socketio.emit('tcp_response', {'hex': data.hex(), 'text': data.decode(errors='replace'), 'timestamp': timestamp})
+            socketio.emit('tcp_response', {
+                'hex': data.hex(),
+                'text': data.decode(errors='replace'),
+                'timestamp': timestamp
+            })
+            if EXTERNAL_URL:
+                try:
+                    payload = {
+                        "timestamp": timestamp,
+                        "hex": data.hex(),
+                        "text": data.decode(errors='replace')
+                    }
+                    response = requests.post(EXTERNAL_URL, json=payload, timeout=5, headers={
+                        'Authorization': f"Bearer {os.getenv('STREAM_TOKEN', '')}"
+                    })
+                    response.raise_for_status()
+                    if external_buffer:
+                        print(f"[External stream] Flushing {len(external_buffer)} buffered messages...")
+                        while external_buffer:
+                            cached = json.loads(external_buffer.pop(0))
+                            requests.post(EXTERNAL_URL, json=cached, timeout=5)
+                        with open(BUFFER_FILE, 'w', encoding='utf-8') as f:
+                            pass
+                except Exception as e:
+                    print(f"[External stream error] {e}")
+                    try:
+                        line = json.dumps(payload)
+                        with open(BUFFER_FILE, 'a', encoding='utf-8') as f:
+                            f.write(line + '\n')
+                        external_buffer.append(line)
+                        print(f"[External stream] Message buffered. Queue length: {len(external_buffer)}")
+                    except Exception as write_error:
+                        print(f"[Buffer write error] {write_error}")
         except Exception as e:
             print(f"[TCP recv error] {e}")
             break
@@ -144,7 +214,7 @@ def handle_connect_tcp():
     global client_socket, connected
     try:
         client_socket = socket.create_connection((W610_IP, W610_PORT), timeout=TCP_TIMEOUT)
-        client_socket.settimeout(None)  # Disable timeout for recv()
+        client_socket.settimeout(None)
         connected = True
         threading.Thread(target=tcp_receive_loop, daemon=True).start()
         emit('tcp_status', {'status': 'connected'})
@@ -164,6 +234,7 @@ def handle_disconnect_tcp():
             pass
     emit('tcp_status', {'status': 'disconnected'})
 
+
 @socketio.on('send_data')
 @login_required
 def handle_send_data(data):
@@ -180,117 +251,4 @@ def handle_send_data(data):
 if __name__ == '__main__':
     os.makedirs('templates', exist_ok=True)
     init_db()
-    with open('templates/login.html', 'w', encoding='utf-8') as f:
-        f.write("""<!DOCTYPE html>
-<html lang='en'>
-<head>
-  <meta charset='UTF-8'>
-  <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-  <title>Login</title>
-  <link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css' rel='stylesheet'>
-</head>
-<body class='bg-light'>
-  <div class='container mt-5'>
-    <div class='card shadow'>
-      <div class='card-body'>
-        <h2 class='card-title'>Login</h2>
-        {% if error %}<div class='alert alert-danger'>{{ error }}</div>{% endif %}
-        <form method='post'>
-          <div class='mb-3'>
-            <label class='form-label'>Username</label>
-            <input type='text' name='username' class='form-control'>
-          </div>
-          <div class='mb-3'>
-            <label class='form-label'>Password</label>
-            <input type='password' name='password' class='form-control'>
-          </div>
-          <button type='submit' class='btn btn-primary'>Login</button>
-        </form>
-      </div>
-    </div>
-  </div>
-</body>
-</html>""")
-
-    with open('templates/index.html', 'w', encoding='utf-8') as f:
-        f.write("""<!DOCTYPE html>
-<html lang='en'>
-<head>
-  <meta charset='UTF-8'>
-  <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-  <title>W610 TCP Web Console</title>
-  <link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css' rel='stylesheet'>
-  <script src='https://cdn.socket.io/4.5.4/socket.io.min.js'></script>
-  <style>
-    #logContainer {
-      height: 300px;
-      overflow-y: auto;
-      font-family: monospace;
-      white-space: pre-wrap;
-      background-color: #f8f9fa;
-      border: 1px solid #dee2e6;
-      padding: 1em;
-    }
-  </style>
-</head>
-<body class='bg-light'>
-  <div class='container mt-4'>
-    <div class='d-flex justify-content-between align-items-center mb-3'>
-      <h2>W610 TCP Web Console</h2>
-      <a href='/logout' class='btn btn-outline-danger btn-sm'>Logout</a>
-    </div>
-    <div class='mb-3'>
-      <strong>Status:</strong> <span id='status' class='text-muted'>disconnected</span>
-      <button onclick='connectTCP()' class='btn btn-success btn-sm ms-3'>Connect</button>
-      <button onclick='disconnectTCP()' class='btn btn-warning btn-sm ms-1'>Disconnect</button>
-    </div>
-    <div id='logContainer' class='mb-4'></div>
-    <div class='row g-2'>
-      <div class='col-auto'>
-        <select id='dataType' class='form-select'>
-          <option value='text'>Text</option>
-          <option value='hex'>Hex</option>
-        </select>
-      </div>
-      <div class='col'>
-        <input type='text' id='inputData' class='form-control' placeholder='Enter text or hex'>
-      </div>
-      <div class='col-auto'>
-        <button onclick='sendData()' class='btn btn-primary'>Send</button>
-      </div>
-    </div>
-  </div>
-  <script>
-    const socket = io();
-    const logContainer = document.getElementById('logContainer');
-
-    socket.on('tcp_status', msg => {
-      document.getElementById('status').innerText = msg.status;
-    });
-
-    socket.on('tcp_response', msg => {
-      const logLine = `[${msg.timestamp}]\n[HEX] ${msg.hex}\n${msg.text}\n`;
-      const div = document.createElement('div');
-      div.textContent = logLine;
-      logContainer.appendChild(div);
-      logContainer.scrollTop = logContainer.scrollHeight;
-    });
-
-    function connectTCP() {
-      socket.emit('connect_tcp');
-    }
-
-    function disconnectTCP() {
-      socket.emit('disconnect_tcp');
-    }
-
-    function sendData() {
-      const type = document.getElementById('dataType').value;
-      const data = document.getElementById('inputData').value;
-      if (!data) return;
-      socket.emit('send_data', { type, text: data, hex: data });
-    }
-  </script>
-</body>
-</html>""")
     socketio.run(app, host='0.0.0.0', port=5000)
